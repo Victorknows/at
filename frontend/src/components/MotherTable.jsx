@@ -1,34 +1,51 @@
-// src/components/MotherTable.jsx
-function MotherTable({ mothers }) {
+import React, { useEffect, useState } from "react";
+import axios from "axios";
+
+function MotherTable() {
+  const [mothers, setMothers] = useState([]);
+
+  useEffect(() => {
+    axios.get("http://localhost:5000/mothers").then((res) => {
+      const data = res.data;
+      const motherList = Object.entries(data).map(([phone, details]) => ({
+        phone,
+        ...details,
+      }));
+      setMothers(motherList);
+    });
+  }, []);
+
   return (
     <div>
-      <h5>Registered Mothers</h5>
-      <table className="table table-bordered table-hover">
-        <thead>
-          <tr>
-            <th>Phone</th>
-            <th>Trimester</th>
-            <th>Check-ins</th>
-            <th>Registered</th>
-          </tr>
-        </thead>
-        <tbody>
-          {Array.isArray(mothers) && mothers.length > 0 ? (
-            mothers.map((m, i) => (
-              <tr key={i}>
-                <td>{m.phone}</td>
-                <td>{m.stage}</td>
-                <td>{m.checkIns}</td>
-                <td>{new Date(m.registeredAt).toLocaleDateString()}</td>
-              </tr>
-            ))
-          ) : (
+      <h2>📋 Registered Mothers</h2>
+      {mothers.length === 0 ? (
+        <p>No mothers found.</p>
+      ) : (
+        <table border="1" cellPadding="10">
+          <thead>
             <tr>
-              <td colSpan="4" className="text-center">No mothers registered.</td>
+              <th>Phone</th>
+              <th>Trimester</th>
+              <th>Registered At</th>
+              <th>Next Clinic Date</th>
             </tr>
-          )}
-        </tbody>
-      </table>
+          </thead>
+          <tbody>
+            {mothers.map((mother, index) => (
+              <tr key={index}>
+                <td>{mother.phone}</td>
+                <td>{mother.stage}</td>
+                <td>{new Date(mother.registeredAt).toLocaleDateString()}</td>
+                <td>
+                  {mother.clinicDate
+                    ? new Date(mother.clinicDate).toLocaleDateString()
+                    : "Not set"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

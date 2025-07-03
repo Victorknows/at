@@ -1,181 +1,217 @@
-// index.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const africastalking = require("africastalking");
+
+const AfricasTalking = require("africastalking")({
+  apiKey: process.env.AT_API_KEY || 'atsk_e3aa4375aedba35a31d26631cc22b5e87aed5a6c05e296e9f5cb69102096009998802c0d',
+  username: process.env.AT_USERNAME || 'muhoro'
+});
+const sms = AfricasTalking.SMS;
 
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
-// Initialize Africa's Talking
-const AT = africastalking({
-  apiKey: process.env.AT_API_KEY,
-  username: process.env.AT_USERNAME,
-});
-const sms = AT.SMS;
-
-// In-memory storage
+const DOCTOR_PASSWORD = "1234";
+const users = {};
 const mothers = {};
-const sessions = {};
-const helpRequests = {};
+const emergencies = [];
+const messages = [];
 
-const trimesterTips = {
-  "Trimester 1": [
-    "Eat small, frequent meals to manage nausea.",
-    "Take folic acid daily to help your baby’s development.",
-  ],
-  "Trimester 2": [
-    "Stay active — gentle walks can help circulation.",
-    "Include calcium-rich foods to support bone growth.",
-  ],
-  "Trimester 3": [
-    "Get plenty of rest. Sleep on your side for better blood flow.",
-    "Practice deep breathing to reduce stress.",
-  ],
-};
+// AUTH
+app.post("/login", (req, res) => {
+  const { phone, role } = req.body;
+  if (!phone || !role) return res.status(400).json({ message: "Phone and role required" });
+  users[phone] = { role };
+  if (role === "Mother" && !mothers[phone]) mothers[phone] = { appointments: [] };
+  return res.json({ success: true, message: "Login successful" });
+});
 
-// USSD Endpoint
-app.post("/ussd", (req, res) => {
-  const { sessionId, phoneNumber, text } = req.body;
+// APPOINTMENTS
+app.post("/appointments", (req, res) => {
+  const { phone, date, description } = req.body;
 
-  let response = "";
-  const inputs = text.split("*");
-  const step = inputs.length;
-
-  if (!sessions[sessionId]) {
-    sessions[sessionId] = {};
+  if (!users[phone] || users[phone].role !== "Mother") {
+    return res.status(403).json({ message: "Only mothers can set appointments" });
   }
 
-  if (text === "") {
-    response = `CON Welcome to MumConnect\n1. Register\n2. Set Next Clinic Date\n3. Emergency Help`;
-  } else if (inputs[0] === "1") {
-    if (step === 1) {
-      response = `CON What trimester are you in?\n1. Trimester 1\n2. Trimester 2\n3. Trimester 3`;
-    } else if (step === 2) {
-      const choice = inputs[1];
-      let trimester = "";
-      if (choice === "1") trimester = "Trimester 1";
-      else if (choice === "2") trimester = "Trimester 2";
-      else if (choice === "3") trimester = "Trimester 3";
-      else trimester = null;
+  const apptDate = new Date(date);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
 
-      if (!trimester) {
-        response = `END Invalid trimester selection.`;
-      } else {
-        if (mothers[phoneNumber]) {
-          response = `END You are already registered with MumConnect.`;
-        } else {
-          mothers[phoneNumber] = {
-            stage: trimester,
-            registeredAt: new Date(),
-            clinicDate: null,
-          };
-          response = `END Registration successful! You're now subscribed to MumConnect (${trimester}).`;
-        }
-      }
-    }
-  } else if (inputs[0] === "2") {
-    if (!mothers[phoneNumber]) {
-      response = `END You're not registered yet. Dial again and select 1 to register.`;
-    } else if (step === 1) {
-      response = `CON Enter your next clinic date (e.g. 2025-07-05):`;
-    } else if (step === 2) {
-      const dateStr = inputs[1];
-      const clinicDate = new Date(dateStr);
-      if (clinicDate.toString() === "Invalid Date") {
-        response = `END Invalid date format. Please try again using YYYY-MM-DD.`;
-      } else {
-        mothers[phoneNumber].clinicDate = clinicDate;
-        response = `END Got it! We'll remind you a day before your clinic visit.`;
-      }
-    }
-  } else if (inputs[0] === "3") {
-    if (!helpRequests[phoneNumber]) helpRequests[phoneNumber] = [];
+  if (isNaN(apptDate.getTime()) || apptDate < today) {
+    return res.status(400).json({ message: "Cannot set appointment in the past" });
+  }
 
-    helpRequests[phoneNumber].push({
-      time: new Date(),
-      registered: !!mothers[phoneNumber],
-    });
+  mothers[phone].appointments.push({ date, description, notified: false });
+  return res.json({ success: true, message: "Appointment saved" });
+});
 
-    response = `END We've received your emergency request. We will contact you on your phone.`;
+app.get("/appointments", (req, res) => {
+  const { phone } = req.query;
+  if (!users[phone]) return res.status(403).json({ message: "Unauthorized" });
+
+  const role = users[phone].role;
+  if (role === "Doctor") {
+    const all = Object.entries(mothers).flatMap(([p, data]) =>
+      data.appointments.map(a => ({ phone: p, ...a }))
+    );
+    return res.json(all);
+  } else if (role === "Mother") {
+    return res.json(mothers[phone].appointments || []);
   } else {
-    response = `END Invalid option. Please try again.`;
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+});
+
+// EMERGENCIES
+app.post("/emergency", (req, res) => {
+  const { phone } = req.body;
+  if (!phone) return res.status(400).json({ message: "Phone required" });
+
+  emergencies.push({ phone, time: new Date().toISOString() });
+  return res.json({ success: true, message: "Emergency logged" });
+});
+
+app.get("/emergency", (req, res) => {
+  const { phone } = req.query;
+  if (!users[phone] || users[phone].role !== "EmergencyTeam") {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+  return res.json(emergencies);
+});
+
+// CHAT
+app.post("/chat", (req, res) => {
+  const { from, to, text } = req.body;
+  if (!users[from] || !users[to]) return res.status(400).json({ message: "Invalid sender or recipient." });
+
+  const fromRole = users[from].role, toRole = users[to].role;
+  if (!((fromRole === "Doctor" && toRole === "Mother") || (fromRole === "Mother" && toRole === "Doctor"))) {
+    return res.status(403).json({ message: "Chat only allowed between doctor and mother." });
+  }
+
+  messages.push({ from, to, text, time: new Date().toISOString() });
+  res.json({ success: true, message: "Message sent." });
+});
+
+app.get("/chat", (req, res) => {
+  const { phone } = req.query;
+  if (!users[phone] || !["Doctor", "Mother"].includes(users[phone].role)) {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+
+  const chat = messages.filter(m => m.from === phone || m.to === phone);
+  res.json(chat);
+});
+
+// USSD
+app.post("/ussd", (req, res) => {
+  const { phoneNumber, text } = req.body;
+  const input = text.split("*");
+  let response = "";
+
+  if (text === "") {
+    response = `CON Welcome to MumConnect!
+1. I am a Mother
+2. I am a Doctor`;
+  } else if (text === "1") {
+    response = `CON What would you like to do?
+1. Set Appointment
+2. Emergency Alert`;
+  } else if (text === "1*1") {
+    response = "CON Enter appointment date (YYYY-MM-DD):";
+  } else if (input.length === 3 && input[0] === "1" && input[1] === "1") {
+    const date = input[2];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const apptDate = new Date(date);
+
+    if (isNaN(apptDate.getTime())) {
+      response = "END Invalid date format.";
+    } else if (apptDate < today) {
+      response = "END You cannot set an appointment in the past.";
+    } else {
+      if (!mothers[phoneNumber]) mothers[phoneNumber] = { appointments: [] };
+      mothers[phoneNumber].appointments.push({ date, description: "From USSD", notified: false });
+      response = "END Appointment saved.";
+    }
+  } else if (text === "1*2") {
+    emergencies.push({ phone: phoneNumber, time: new Date().toISOString() });
+    response = "END Emergency alert sent.";
+  } else if (text === "2") {
+    response = "CON Enter doctor password:";
+  } else if (input[0] === "2" && input.length === 2) {
+    response = input[1] === DOCTOR_PASSWORD
+      ? "CON Enter patient phone number to view appointments:"
+      : "END Invalid password.";
+  } else if (input[0] === "2" && input.length === 3) {
+    const password = input[1];
+    const patientPhone = input[2];
+    if (password !== DOCTOR_PASSWORD) {
+      response = "END Invalid password.";
+    } else {
+      const appts = mothers[patientPhone]?.appointments || [];
+      if (appts.length === 0) {
+        response = "END No appointments found.";
+      } else {
+        const list = appts.map((a, i) => `${i + 1}. ${a.date} - ${a.description}`).join("\n");
+        response = `END Appointments:\n${list}`;
+      }
+    }
+  } else {
+    response = "END Invalid input.";
   }
 
   res.set("Content-Type", "text/plain");
   res.send(response);
 });
 
-// Send weekly tips + clinic reminders
-app.get("/send-weekly-tips", async (req, res) => {
-  const sent = [];
+// ADMIN DASHBOARD ROUTE
+app.get("/admin/dashboard", (req, res) => {
+  const { adminKey } = req.query;
 
-  const now = new Date();
-  const tomorrow = new Date();
-  tomorrow.setDate(now.getDate() + 1);
+  if (adminKey !== "admin123") {
+    return res.status(403).json({ message: "Unauthorized" });
+  }
+
+  const allUsers = users;
+  const allAppointments = Object.entries(mothers).flatMap(([phone, data]) =>
+    data.appointments.map(a => ({ phone, ...a }))
+  );
+  const allEmergencies = emergencies;
+
+  res.json({
+    users: allUsers,
+    appointments: allAppointments,
+    emergencies: allEmergencies,
+  });
+});
+
+// APPOINTMENT REMINDER JOB
+setInterval(async () => {
+  const todayStr = new Date().toISOString().split("T")[0];
 
   for (const phone in mothers) {
-    const mother = mothers[phone];
-    const tips = trimesterTips[mother.stage];
-    if (tips && tips.length > 0) {
-      const tip = tips[Math.floor(Math.random() * tips.length)];
-
+    const reminders = mothers[phone].appointments.filter(a => a.date === todayStr && !a.notified);
+    if (reminders.length > 0) {
       try {
         await sms.send({
           to: [phone],
-          message: `MumConnect Tip (${mother.stage}): ${tip}`,
+          message: `Reminder: You have ${reminders.length} appointment(s) scheduled today.`,
         });
-        sent.push({ phone, message: tip });
-      } catch (err) {
-        console.error(`❌ Failed to send to ${phone}:`, err.message);
-      }
-    }
-
-    // Clinic reminder
-    if (
-      mother.clinicDate &&
-      mother.clinicDate.toDateString() === tomorrow.toDateString()
-    ) {
-      try {
-        await sms.send({
-          to: [phone],
-          message: `Reminder: You have a clinic visit scheduled for tomorrow (${mother.clinicDate.toDateString()}).`,
-        });
-        sent.push({ phone, message: "Clinic reminder sent" });
-      } catch (err) {
-        console.error(`❌ Failed clinic reminder to ${phone}:`, err.message);
+        reminders.forEach(a => a.notified = true);
+        console.log(`📨 Sent SMS reminder to ${phone}`);
+      } catch (error) {
+        console.error(`❌ Failed to send SMS to ${phone}:`, error.message);
       }
     }
   }
+}, 60 * 1000); // check every 60 seconds
 
-  res.json({ success: true, sent });
-});
-
-// Admin endpoints
-app.get("/mothers", (req, res) => {
-  res.json(mothers);
-});
-
-app.get("/help-requests", (req, res) => {
-  res.json(helpRequests);
-});
-
-app.post("/send-sms", async (req, res) => {
-  const { to, message } = req.body;
-  try {
-    const result = await sms.send({
-      to: [to],
-      message,
-    });
-    res.json({ success: true, result });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
+// SERVER
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () =>
-  console.log(`✅ MumConnect server running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`✅ MumConnect backend running on http://localhost:${PORT}`);
+});
